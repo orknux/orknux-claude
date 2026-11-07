@@ -12,9 +12,9 @@ Talk to your Claude Code session from Orknux. Pick **My Claude Code**:
 Tool approvals Claude Code asks for are shown where you asked, and answered
 there.
 
-Offered in the local editions of Orknux - the desktop app (Windows, Linux) and
-`orknux-one` - and in the desktop app connected to any Orknux server (client
-mode). Nobody else on that server sees or reaches your Claude Code.
+Offered on every Orknux server, in the browser and in the desktop app. Nobody
+else on that server sees or reaches your Claude Code: each message goes only to
+the Claude Code of the person whose chat it is.
 
 ## What stays where
 
