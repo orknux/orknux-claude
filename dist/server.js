@@ -18861,10 +18861,10 @@ class StreamableHTTPClientTransport {
   }
 }
 // server.ts
-import { existsSync, readFileSync } from "fs";
-import { homedir } from "os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir, hostname as hostname2 } from "os";
 import { join } from "path";
-var VERSION = "1.0.1";
+var VERSION = "1.0.3";
 var WAIT_SECONDS = 25;
 var RETRY_MS = 3000;
 var STATE_DIR = process.env.ORKNUX_STATE_DIR ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "channels", "orknux");
@@ -18879,6 +18879,35 @@ if (existsSync(ENV_FILE)) {
 }
 var SERVER = (process.env.ORKNUX_URL ?? "").replace(/\/+$/, "");
 var TOKEN = (process.env.ORKNUX_TOKEN ?? "").trim();
+var PAIRING_CODE = /^[A-HJ-NP-Za-hj-np-z2-9]{3}-?[A-HJ-NP-Za-hj-np-z2-9]{3}$/;
+async function pairIfCode() {
+  if (!PAIRING_CODE.test(TOKEN))
+    return true;
+  try {
+    const answer = await fetch(`${SERVER}/api/clients/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: TOKEN, client: "ClaudeCode", name: `Claude Code on ${hostname2()}` })
+    });
+    const said = await answer.json().catch(() => ({}));
+    if (!answer.ok || !said.credential) {
+      log(said.error ?? `Orknux answered ${answer.status} to the pairing code; make a new one and run /orknux:configure again`);
+      return false;
+    }
+    TOKEN = said.credential;
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(ENV_FILE, `ORKNUX_URL=${SERVER}
+ORKNUX_TOKEN=${TOKEN}
+`);
+    try {
+      chmodSync(ENV_FILE, 384);
+    } catch {}
+    return true;
+  } catch (failed) {
+    log(`Orknux could not be reached to trade the pairing code: ${failed.message}`);
+    return false;
+  }
+}
 var log = (...said) => console.error("[orknux]", ...said);
 var mcp = new Server({ name: "orknux", version: VERSION }, {
   capabilities: {
@@ -19018,9 +19047,11 @@ async function handle(command) {
 }
 async function poll() {
   if (SERVER === "" || TOKEN === "") {
-    log(`not configured: run /orknux:configure <server> <token>, or set ORKNUX_URL and ORKNUX_TOKEN in ${ENV_FILE}`);
+    log(`not configured: run /orknux:configure <server> <code or token>, or set ORKNUX_URL and ORKNUX_TOKEN in ${ENV_FILE}`);
     return;
   }
+  if (!await pairIfCode())
+    return;
   try {
     const compatible = await fetch(`${SERVER}/api/client/compatibility?client=${VERSION}`).then((r) => r.json());
     if (compatible?.compatible === false) {
@@ -19037,7 +19068,7 @@ async function poll() {
       continue;
     }
     if (response.status === 401) {
-      log("Orknux refused the token; make a new one and run /orknux:configure again");
+      log("Orknux refused the token; make a new pairing code or token and run /orknux:configure again");
       return;
     }
     if (response.status === 204)

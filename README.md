@@ -40,11 +40,16 @@ In Claude Code:
 /plugin install orknux@orknux
 ```
 
-Then make a **read and write** access token on your Orknux profile page and:
+Then, in Orknux, open **Preferences › Connected clients**, press **Connect a
+client**, and type the code it shows within five minutes:
 
 ```
-/orknux:configure http://127.0.0.1:8080 orkx_...
+/orknux:configure http://127.0.0.1:8080 K7P-4QX
 ```
+
+The plugin trades the code for a credential of its own, which opens only the
+doors the Orknux clients use. Any account can do this, one from a directory
+too. A **read and write** access token works in place of the code.
 
 The address is the one you open Orknux at. It is kept in
 `~/.claude/channels/orknux/.env`, readable only by you.

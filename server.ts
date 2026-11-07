@@ -14,8 +14,9 @@
  * chat and answered there (POST /api/claude/permissions, then a "permission"
  * command back). Nothing listens on this machine.
  *
- * Who may write here is decided by the token: it is the person's own Orknux
- * access token, and Orknux hands this session only that person's chats.
+ * Who may write here is decided by the token: the credential a pairing code
+ * was traded for, or the person's own Orknux access token, and Orknux hands
+ * this session only that person's chats.
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -23,11 +24,11 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
-import { existsSync, readFileSync } from 'fs'
-import { homedir } from 'os'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { homedir, hostname } from 'os'
 import { join } from 'path'
 
-const VERSION = '1.0.1'
+const VERSION = '1.0.3'
 const WAIT_SECONDS = 25
 const RETRY_MS = 3_000
 
@@ -44,7 +45,43 @@ if (existsSync(ENV_FILE)) {
 }
 
 const SERVER = (process.env.ORKNUX_URL ?? '').replace(/\/+$/, '')
-const TOKEN = (process.env.ORKNUX_TOKEN ?? '').trim()
+let TOKEN = (process.env.ORKNUX_TOKEN ?? '').trim()
+
+/** A pairing code as Orknux shows it, K7P-4QX: any case, with or without its dash. */
+const PAIRING_CODE = /^[A-HJ-NP-Za-hj-np-z2-9]{3}-?[A-HJ-NP-Za-hj-np-z2-9]{3}$/
+
+/**
+ * Trades a pairing code for this session's own credential and writes that to
+ * the .env in place of the code, which works once and for minutes. Any
+ * account may pair, a directory one too, which may not have an access token.
+ */
+async function pairIfCode(): Promise<boolean> {
+  if (!PAIRING_CODE.test(TOKEN)) return true
+  try {
+    const answer = await fetch(`${SERVER}/api/clients/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: TOKEN, client: 'ClaudeCode', name: `Claude Code on ${hostname()}` }),
+    })
+    const said = (await answer.json().catch(() => ({}))) as { credential?: string; error?: string }
+    if (!answer.ok || !said.credential) {
+      log(said.error ?? `Orknux answered ${answer.status} to the pairing code; make a new one and run /orknux:configure again`)
+      return false
+    }
+    TOKEN = said.credential
+    mkdirSync(STATE_DIR, { recursive: true })
+    writeFileSync(ENV_FILE, `ORKNUX_URL=${SERVER}\nORKNUX_TOKEN=${TOKEN}\n`)
+    try {
+      chmodSync(ENV_FILE, 0o600)
+    } catch {
+      // Windows keeps no such mode; the file is in the person's own profile.
+    }
+    return true
+  } catch (failed) {
+    log(`Orknux could not be reached to trade the pairing code: ${(failed as Error).message}`)
+    return false
+  }
+}
 
 const log = (...said: unknown[]) => console.error('[orknux]', ...said)
 
@@ -217,9 +254,10 @@ async function handle(command: { action: string; arguments: Record<string, unkno
 /** Ask for work until the session ends; a server that is down is asked again, a refused token is not. */
 async function poll() {
   if (SERVER === '' || TOKEN === '') {
-    log(`not configured: run /orknux:configure <server> <token>, or set ORKNUX_URL and ORKNUX_TOKEN in ${ENV_FILE}`)
+    log(`not configured: run /orknux:configure <server> <code or token>, or set ORKNUX_URL and ORKNUX_TOKEN in ${ENV_FILE}`)
     return
   }
+  if (!(await pairIfCode())) return
   try {
     const compatible = await fetch(`${SERVER}/api/client/compatibility?client=${VERSION}`).then((r) => r.json())
     if (compatible?.compatible === false) {
@@ -238,7 +276,7 @@ async function poll() {
       continue
     }
     if (response.status === 401) {
-      log('Orknux refused the token; make a new one and run /orknux:configure again')
+      log('Orknux refused the token; make a new pairing code or token and run /orknux:configure again')
       return
     }
     if (response.status === 204) continue

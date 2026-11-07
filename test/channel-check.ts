@@ -9,7 +9,7 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -17,6 +17,8 @@ const TOKEN = 'orkx_test'
 const commands: unknown[] = []
 const posted: { path: string; body: any; auth: string | null }[] = []
 const mcpCalls: string[] = []
+const paired: any[] = []
+const STATE = mkdtempSync(join(tmpdir(), 'orknux-state-'))
 let failures = 0
 const check = (what: string, ok: boolean, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${what}${detail ? ' - ' + detail : ''}`)
@@ -29,6 +31,13 @@ const stub = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url)
     if (url.pathname === '/api/client/compatibility') return Response.json({ compatible: true })
+    if (url.pathname === '/api/clients/pair' && req.method === 'POST') {
+      const asked = (await req.json()) as any
+      paired.push(asked)
+      return asked.code.toUpperCase().replace('-', '') === 'K7P4QX'
+        ? Response.json({ credential: TOKEN, user: 'alice' })
+        : Response.json({ error: 'That pairing code is not valid.' }, { status: 400 })
+    }
     if (req.headers.get('authorization') !== `Bearer ${TOKEN}`) return new Response(null, { status: 401 })
     // The workspace's MCP server, as Orknux answers it: JSON-RPC over POST, no stream.
     if (url.pathname === '/mcp/7') {
@@ -73,8 +82,9 @@ await client.connect(
     env: {
       ...process.env,
       ORKNUX_URL: `http://127.0.0.1:${stub.port}/`,
-      ORKNUX_TOKEN: TOKEN,
-      ORKNUX_STATE_DIR: mkdtempSync(join(tmpdir(), 'orknux-state-')),
+      // A pairing code, as Orknux shows it: traded for the session's own credential at start.
+      ORKNUX_TOKEN: 'k7p-4qx',
+      ORKNUX_STATE_DIR: STATE,
     } as Record<string, string>,
   }),
 )
@@ -88,6 +98,11 @@ const until = async (ok: () => boolean, ms = 5000) => {
   while (!ok() && Date.now() < end) await Bun.sleep(25)
   return ok()
 }
+
+await until(() => paired.length > 0)
+check('a pairing code is traded once, as Claude Code', paired.length === 1 && paired[0].client === 'ClaudeCode', JSON.stringify(paired))
+await until(() => { try { return readFileSync(join(STATE, '.env'), 'utf8').includes(TOKEN) } catch { return false } })
+check('and the credential replaces the code in the .env', (() => { try { const env = readFileSync(join(STATE, '.env'), 'utf8'); return env.includes(`ORKNUX_TOKEN=${TOKEN}`) && !env.includes('k7p') } catch { return false } })())
 
 commands.push({ id: '1', action: 'message', arguments: { chat_id: '42', chat_title: 'Plans', workspace_id: '7', text: 'list the files' } })
 await until(() => notifications.some((n) => n.method === 'notifications/claude/channel'))
