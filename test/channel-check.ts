@@ -68,7 +68,8 @@ client.fallbackNotificationHandler = async (n) => {
 await client.connect(
   new StdioClientTransport({
     command: 'bun',
-    args: ['server.ts'],
+    // The bundle, which is what Claude Code starts: no install, no network.
+    args: ['dist/server.js'],
     env: {
       ...process.env,
       ORKNUX_URL: `http://127.0.0.1:${stub.port}/`,

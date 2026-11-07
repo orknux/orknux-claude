@@ -29,7 +29,9 @@ configured in Orknux.
 
 ## Install
 
-Requires [Bun](https://bun.sh), like Anthropic's own channel plugins.
+Requires [Bun](https://bun.sh), like Anthropic's own channel plugins. The
+plugin ships as one bundled file (`dist/server.js`), so starting it installs
+nothing and needs no network.
 
 In Claude Code:
 
@@ -78,6 +80,15 @@ It also brings two tools, `orknux_tools` and `orknux_call`, which reach the
 workspace's own MCP server (`/mcp/{workspace}`) with your token, through the
 official MCP client - so Claude Code can read and change what a page is about
 without a second server to set up.
+
+## Building
+
+`server.ts` is the source; `dist/server.js` is what Claude Code starts, built
+with its dependencies inside. Rebuild it after any change and commit both:
+
+```
+bun run build
+```
 
 ## Checking it
 

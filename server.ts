@@ -27,7 +27,7 @@ import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
-const VERSION = '1.0.0'
+const VERSION = '1.0.1'
 const WAIT_SECONDS = 25
 const RETRY_MS = 3_000
 

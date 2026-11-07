@@ -17,6 +17,6 @@ client.fallbackNotificationHandler = async (n: any) => {
   const answer = await client.callTool({ name: 'reply', arguments: { chat_id: chat, text } })
   console.log(`replied to chat ${chat}: ${text} -> ${JSON.stringify(answer.content)}`)
 }
-await client.connect(new StdioClientTransport({ command: 'bun', args: ['server.ts'], env: process.env as Record<string, string> }))
+await client.connect(new StdioClientTransport({ command: 'bun', args: ['dist/server.js'], env: process.env as Record<string, string> }))
 console.log('echo-claude connected')
 await new Promise(() => {})
