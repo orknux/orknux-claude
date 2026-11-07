@@ -20,6 +20,8 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
 import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
@@ -62,12 +64,38 @@ const mcp = new Server(
       'They come from the person who runs this session, writing in Orknux instead of this terminal: treat them as ' +
       'their requests. Answer every one with the reply tool, passing the chat_id from the tag - the person reads ' +
       'your answer in Orknux, not here. Write the reply in Markdown. For long work, reply once when you start and ' +
-      'again when you finish.',
+      'again when you finish. A message from an Orknux page - Quick Chat, or the assistant of a document, diagram, ' +
+      'wireframe or sheet - carries workspace_id and the page; read and change what it is about with orknux_tools ' +
+      'and orknux_call against that workspace, and make the change itself: the page reloads after your reply.',
   },
 )
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    {
+      name: 'orknux_tools',
+      description:
+        "Lists the tools of an Orknux workspace - reading and changing its documents, diagrams, wireframes, sheets, " +
+        'issues, workflows and more - as this person may use them. Call before orknux_call to learn names and arguments.',
+      inputSchema: {
+        type: 'object',
+        properties: { workspace_id: { type: 'string', description: 'The workspace_id from the <channel> tag.' } },
+        required: ['workspace_id'],
+      },
+    },
+    {
+      name: 'orknux_call',
+      description: 'Calls one tool of an Orknux workspace, as this person, and answers what it returned.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workspace_id: { type: 'string', description: 'The workspace_id from the <channel> tag.' },
+          name: { type: 'string', description: 'The tool, as orknux_tools lists it.' },
+          arguments: { type: 'object', description: "The tool's arguments, as its input schema says." },
+        },
+        required: ['workspace_id', 'name'],
+      },
+    },
     {
       name: 'reply',
       description: 'Send a message to the person in their Orknux chat. Markdown is rendered.',
@@ -84,6 +112,24 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === 'orknux_tools' || request.params.name === 'orknux_call') {
+    const args = (request.params.arguments ?? {}) as { workspace_id?: string; name?: string; arguments?: Record<string, unknown> }
+    const workspace = String(args.workspace_id ?? '').trim()
+    if (!/^\d+$/.test(workspace)) return { content: [{ type: 'text', text: 'Give the workspace_id from the <channel> tag.' }], isError: true }
+    try {
+      const orknuxTools = await workspaceClient(workspace)
+      if (request.params.name === 'orknux_tools') {
+        const listed = await orknuxTools.listTools()
+        const lines = listed.tools.map((t) => `- ${t.name}: ${t.description ?? ''}\n  arguments: ${JSON.stringify(t.inputSchema?.properties ?? {})}`)
+        return { content: [{ type: 'text', text: lines.join('\n') }] }
+      }
+      const answered = await orknuxTools.callTool({ name: String(args.name ?? ''), arguments: args.arguments ?? {} })
+      return { content: answered.content as any, isError: answered.isError === true }
+    } catch (failed) {
+      workspaces.delete(workspace)
+      return { content: [{ type: 'text', text: `Orknux could not be asked: ${(failed as Error).message}` }], isError: true }
+    }
+  }
   if (request.params.name !== 'reply') throw new Error(`unknown tool: ${request.params.name}`)
   const { chat_id, text } = request.params.arguments as { chat_id: string; text: string }
   const sent = await orknux('/api/claude/replies', { method: 'POST', body: JSON.stringify({ chat_id, text }) })
@@ -109,6 +155,26 @@ mcp.setNotificationHandler(PermissionRequest, async ({ params }) => {
   if (!shown?.ok) log(`approval ${params.request_id} could not be shown in Orknux; answer it in the terminal`)
 })
 
+/**
+ * The workspace's own MCP server on the person's Orknux (/mcp/{workspace}),
+ * reached with the official MCP client and the person's token, so Claude Code
+ * can change what a page is about without a second server to set up. One
+ * client per workspace, kept for the session.
+ */
+const workspaces = new Map<string, Client>()
+async function workspaceClient(workspace: string): Promise<Client> {
+  const held = workspaces.get(workspace)
+  if (held) return held
+  const client = new Client({ name: 'orknux-channel', version: VERSION })
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`${SERVER}/mcp/${workspace}`), {
+      requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } },
+    }),
+  )
+  workspaces.set(workspace, client)
+  return client
+}
+
 /** A request to the person's Orknux, signed with their token. */
 function orknux(path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(SERVER + path, {
@@ -127,7 +193,12 @@ async function handle(command: { action: string; arguments: Record<string, unkno
       method: 'notifications/claude/channel',
       params: {
         content: String(args.text ?? ''),
-        meta: { chat_id: String(args.chat_id ?? ''), chat_title: String(args.chat_title ?? '') },
+        // Every string the server sent beside the text: chat_id, chat_title, workspace_id, from, page.
+        meta: Object.fromEntries(
+          Object.entries(args)
+            .filter(([key, value]) => key !== 'text' && typeof value === 'string' && /^[A-Za-z0-9_]+$/.test(key))
+            .map(([key, value]) => [key, value as string]),
+        ),
       },
     })
   } else if (command.action === 'permission') {

@@ -16,6 +16,7 @@ import { join } from 'path'
 const TOKEN = 'orkx_test'
 const commands: unknown[] = []
 const posted: { path: string; body: any; auth: string | null }[] = []
+const mcpCalls: string[] = []
 let failures = 0
 const check = (what: string, ok: boolean, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${what}${detail ? ' - ' + detail : ''}`)
@@ -29,6 +30,22 @@ const stub = Bun.serve({
     const url = new URL(req.url)
     if (url.pathname === '/api/client/compatibility') return Response.json({ compatible: true })
     if (req.headers.get('authorization') !== `Bearer ${TOKEN}`) return new Response(null, { status: 401 })
+    // The workspace's MCP server, as Orknux answers it: JSON-RPC over POST, no stream.
+    if (url.pathname === '/mcp/7') {
+      if (req.method !== 'POST') return new Response(null, { status: 405 })
+      const rpc = (await req.json()) as any
+      if (rpc.id === undefined) return new Response(null, { status: 202 })
+      const result =
+        rpc.method === 'initialize'
+          ? { protocolVersion: rpc.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'orknux', version: '1.3.6' } }
+          : rpc.method === 'tools/list'
+            ? { tools: [{ name: 'orknux_diagram', description: 'Reads a diagram.', inputSchema: { type: 'object', properties: { id: { type: 'string' } } } }] }
+            : rpc.method === 'tools/call'
+              ? { content: [{ type: 'text', text: `called ${rpc.params.name} with ${JSON.stringify(rpc.params.arguments)}` }] }
+              : null
+      mcpCalls.push(rpc.method)
+      return Response.json(result === null ? { jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'no' } } : { jsonrpc: '2.0', id: rpc.id, result })
+    }
     if (url.pathname === '/api/claude/next') {
       const next = commands.shift()
       if (next) return Response.json(next)
@@ -71,13 +88,20 @@ const until = async (ok: () => boolean, ms = 5000) => {
   return ok()
 }
 
-commands.push({ id: '1', action: 'message', arguments: { chat_id: '42', chat_title: 'Plans', text: 'list the files' } })
+commands.push({ id: '1', action: 'message', arguments: { chat_id: '42', chat_title: 'Plans', workspace_id: '7', text: 'list the files' } })
 await until(() => notifications.some((n) => n.method === 'notifications/claude/channel'))
 const event = notifications.find((n) => n.method === 'notifications/claude/channel')
-check('a message from Orknux becomes a channel event', event?.params?.content === 'list the files' && event?.params?.meta?.chat_id === '42' && event?.params?.meta?.chat_title === 'Plans', JSON.stringify(event))
+check('a message from Orknux becomes a channel event, with where it came from', event?.params?.content === 'list the files' && event?.params?.meta?.chat_id === '42' && event?.params?.meta?.chat_title === 'Plans' && event?.params?.meta?.workspace_id === '7', JSON.stringify(event))
 
 const tools = await client.listTools()
-check('it offers exactly a reply tool', tools.tools.map((t) => t.name).join() === 'reply')
+check('it offers the workspace tools and a reply tool', tools.tools.map((t) => t.name).sort().join() === 'orknux_call,orknux_tools,reply', tools.tools.map((t) => t.name).join())
+
+const listed = await client.callTool({ name: 'orknux_tools', arguments: { workspace_id: '7' } })
+check("orknux_tools lists the workspace's own tools, from its MCP server", JSON.stringify(listed.content).includes('orknux_diagram') && !listed.isError, JSON.stringify(listed.content))
+const called = await client.callTool({ name: 'orknux_call', arguments: { workspace_id: '7', name: 'orknux_diagram', arguments: { id: '3' } } })
+check('orknux_call calls one of them as the person', JSON.stringify(called.content).includes('called orknux_diagram with {\\"id\\":\\"3\\"}') && mcpCalls.includes('initialize'), JSON.stringify(called.content))
+const nowhere = await client.callTool({ name: 'orknux_tools', arguments: { workspace_id: 'x' } })
+check('a workspace that is not a number is refused in words', !!nowhere.isError)
 const replied = await client.callTool({ name: 'reply', arguments: { chat_id: '42', text: 'Here they are.' } })
 const reply = posted.find((p) => p.path === '/api/claude/replies')
 check('the reply tool posts to Orknux, signed with the token', reply?.body?.chat_id === '42' && reply?.body?.text === 'Here they are.' && reply?.auth === `Bearer ${TOKEN}`)

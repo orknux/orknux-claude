@@ -1,12 +1,20 @@
 # Orknux channel for Claude Code
 
-Talk to your Claude Code session from an Orknux chat. In Orknux, pick
-**My Claude Code** in a chat's agent picker; what you write there arrives in
-this session, and Claude's answers come back into the chat. Tool approvals
-Claude Code asks for are shown in the chat too, and answered there.
+Talk to your Claude Code session from Orknux. Pick **My Claude Code**:
 
-Available in the local editions of Orknux only: the desktop app (Windows,
-Linux) and `orknux-one`.
+- in a chat's agent picker - what you write arrives in this session, and
+  Claude's answers come back into the chat;
+- in the assistant of a document, diagram, wireframe or sheet - Claude Code
+  changes the item itself through the workspace's Orknux tools, and the page
+  reloads it;
+- in Quick Chat (Ask AI), under *Answered by*.
+
+Tool approvals Claude Code asks for are shown where you asked, and answered
+there.
+
+Offered in the local editions of Orknux - the desktop app (Windows, Linux) and
+`orknux-one` - and in the desktop app connected to any Orknux server (client
+mode). Nobody else on that server sees or reaches your Claude Code.
 
 ## What stays where
 
@@ -65,6 +73,11 @@ poll open to `GET /api/claude/next` on your Orknux - the same door the Orknux
 Chrome extension and Orknux for Windows use - and pushes each message into the
 session as a `<channel>` event. Claude answers with the `reply` tool, which
 posts to `/api/claude/replies`. Nothing listens on your machine.
+
+It also brings two tools, `orknux_tools` and `orknux_call`, which reach the
+workspace's own MCP server (`/mcp/{workspace}`) with your token, through the
+official MCP client - so Claude Code can read and change what a page is about
+without a second server to set up.
 
 ## Checking it
 
