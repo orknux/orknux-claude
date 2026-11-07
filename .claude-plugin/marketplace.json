@@ -1,0 +1,11 @@
+{
+  "name": "orknux",
+  "owner": { "name": "Orknux" },
+  "plugins": [
+    {
+      "name": "orknux",
+      "source": "./",
+      "description": "Talk to this Claude Code session from an Orknux chat."
+    }
+  ]
+}
