@@ -40,19 +40,22 @@ In Claude Code:
 /plugin install orknux@orknux
 ```
 
-Then, in Orknux, open **Preferences › Connected clients**, press **Connect a
-client**, and type the code it shows within five minutes:
+Start Claude Code with the channel (see **Start** below). Then, in Orknux,
+open **Preferences › Connected clients**, press **Connect a client**, copy the
+pairing link it shows and paste it into the session:
 
 ```
-/orknux:configure http://127.0.0.1:8080 K7P-4QX
+connect to Orknux: https://orknux.example.com/pair/K7P-4QX
 ```
 
-The plugin trades the code for a credential of its own, which opens only the
-doors the Orknux clients use. Any account can do this, one from a directory
-too. A **read and write** access token works in place of the code.
+Claude calls the channel's `orknux_connect` tool, which trades the code for a
+credential of its own and connects at once - no restart, nothing to edit. The
+credential opens only the doors the Orknux clients use, and any account can
+pair, one from a directory too. `/orknux:configure <link>` does the same, and a
+server address with a **read and write** access token works in place of a link.
 
-The address is the one you open Orknux at. It is kept in
-`~/.claude/channels/orknux/.env`, readable only by you.
+What it connected to is kept in `~/.claude/channels/orknux/.env`, readable only
+by you, so the next start connects by itself.
 
 ## Start
 

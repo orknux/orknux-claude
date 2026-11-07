@@ -28,7 +28,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'f
 import { homedir, hostname } from 'os'
 import { join } from 'path'
 
-const VERSION = '1.0.3'
+const VERSION = '1.0.4'
 const WAIT_SECONDS = 25
 const RETRY_MS = 3_000
 
@@ -44,11 +44,42 @@ if (existsSync(ENV_FILE)) {
   }
 }
 
-const SERVER = (process.env.ORKNUX_URL ?? '').replace(/\/+$/, '')
+// Both change while the session runs: orknux_connect points the channel somewhere else without a restart.
+let SERVER = (process.env.ORKNUX_URL ?? '').replace(/\/+$/, '')
 let TOKEN = (process.env.ORKNUX_TOKEN ?? '').trim()
 
 /** A pairing code as Orknux shows it, K7P-4QX: any case, with or without its dash. */
 const PAIRING_CODE = /^[A-HJ-NP-Za-hj-np-z2-9]{3}-?[A-HJ-NP-Za-hj-np-z2-9]{3}$/
+
+/**
+ * A pairing link, which Connect a client in Orknux shows: the server and a
+ * code in one thing to copy - https://orknux.example.com/pair/K7P-4QX.
+ * Everything before the last /pair/ is the server, so one under a path prefix works.
+ */
+const PAIRING_LINK = /^\s*(https?:\/\/.+)\/pair\/([A-HJ-NP-Za-hj-np-z2-9]{3}-?[A-HJ-NP-Za-hj-np-z2-9]{3})\/?\s*$/
+
+/** Writes where the channel connects to the state directory's .env, readable only by the person where the system can say so. */
+function saveEnv() {
+  mkdirSync(STATE_DIR, { recursive: true })
+  writeFileSync(ENV_FILE, `ORKNUX_URL=${SERVER}\nORKNUX_TOKEN=${TOKEN}\n`)
+  try {
+    chmodSync(ENV_FILE, 0o600)
+  } catch {
+    // Windows keeps no such mode; the file is in the person's own profile.
+  }
+}
+
+/** The credential [code] is traded for at [server]; throws the server's refusal in words. */
+async function trade(server: string, code: string): Promise<string> {
+  const answer = await fetch(`${server}/api/clients/pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: code.trim(), client: 'ClaudeCode', name: `Claude Code on ${hostname()}` }),
+  })
+  const said = (await answer.json().catch(() => ({}))) as { credential?: string; error?: string }
+  if (!answer.ok || !said.credential) throw new Error(said.error ?? `Orknux answered ${answer.status} to the pairing code. Is ${server} an Orknux server?`)
+  return said.credential
+}
 
 /**
  * Trades a pairing code for this session's own credential and writes that to
@@ -58,29 +89,36 @@ const PAIRING_CODE = /^[A-HJ-NP-Za-hj-np-z2-9]{3}-?[A-HJ-NP-Za-hj-np-z2-9]{3}$/
 async function pairIfCode(): Promise<boolean> {
   if (!PAIRING_CODE.test(TOKEN)) return true
   try {
-    const answer = await fetch(`${SERVER}/api/clients/pair`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: TOKEN, client: 'ClaudeCode', name: `Claude Code on ${hostname()}` }),
-    })
-    const said = (await answer.json().catch(() => ({}))) as { credential?: string; error?: string }
-    if (!answer.ok || !said.credential) {
-      log(said.error ?? `Orknux answered ${answer.status} to the pairing code; make a new one and run /orknux:configure again`)
-      return false
-    }
-    TOKEN = said.credential
-    mkdirSync(STATE_DIR, { recursive: true })
-    writeFileSync(ENV_FILE, `ORKNUX_URL=${SERVER}\nORKNUX_TOKEN=${TOKEN}\n`)
-    try {
-      chmodSync(ENV_FILE, 0o600)
-    } catch {
-      // Windows keeps no such mode; the file is in the person's own profile.
-    }
+    TOKEN = await trade(SERVER, TOKEN)
+    saveEnv()
     return true
   } catch (failed) {
-    log(`Orknux could not be reached to trade the pairing code: ${(failed as Error).message}`)
+    log(`the pairing code was not traded: ${(failed as Error).message} - make a new one in Orknux and pass the link to orknux_connect`)
     return false
   }
+}
+
+/**
+ * Points the channel at [server] with [codeOrToken] - a pairing code is traded
+ * first - checks Orknux takes it, saves it, and moves the running poll over at
+ * once: no restart of Claude Code. Answers who it connected as.
+ */
+async function connectTo(server: string, codeOrToken: string): Promise<string> {
+  const address = server.trim().replace(/\/+$/, '')
+  if (!/^https?:\/\/[^/]/.test(address)) throw new Error(`"${server}" is not a server address; it starts with http:// or https://.`)
+  let credential = codeOrToken.trim()
+  if (credential === '') throw new Error('Give the pairing link from Orknux, or a server address and an access token.')
+  if (PAIRING_CODE.test(credential)) credential = await trade(address, credential)
+  const hello = await fetch(`${address}/api/claude/hello`, { headers: { Authorization: `Bearer ${credential}` } })
+  if (hello.status === 401) throw new Error('Orknux refused that token. Make a new pairing link in Orknux: Preferences › Connected clients › Connect a client.')
+  if (!hello.ok) throw new Error(`Orknux answered ${hello.status}. Is ${address} an Orknux server new enough for Claude Code?`)
+  const { user } = (await hello.json().catch(() => ({}))) as { user?: string }
+  SERVER = address
+  TOKEN = credential
+  saveEnv()
+  workspaces.clear()
+  startPolling()
+  return user ?? 'you'
 }
 
 const log = (...said: unknown[]) => console.error('[orknux]', ...said)
@@ -97,6 +135,11 @@ const mcp = new Server(
       tools: {},
     },
     instructions:
+      (SERVER === '' || TOKEN === ''
+        ? 'This channel is NOT connected to Orknux yet. When the person pastes an Orknux pairing link (https://<their Orknux>/pair/<code>) ' +
+          'or asks to connect to Orknux, call orknux_connect with it; tell them to make one in Orknux under Preferences › Connected clients › ' +
+          'Connect a client if they have none. '
+        : 'If the person pastes an Orknux pairing link or asks to connect to another Orknux, call orknux_connect. ') +
       'Messages from the person\'s Orknux chat arrive as <channel source="orknux" chat_id="..." chat_title="...">. ' +
       'They come from the person who runs this session, writing in Orknux instead of this terminal: treat them as ' +
       'their requests. Answer every one with the reply tool, passing the chat_id from the tag - the person reads ' +
@@ -109,6 +152,20 @@ const mcp = new Server(
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    {
+      name: 'orknux_connect',
+      description:
+        'Connects this channel to the person\'s Orknux, at once and without a restart. Give the pairing link Orknux shows under ' +
+        'Preferences › Connected clients › Connect a client (https://<server>/pair/<code>), or a server address with a pairing code or access token.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          link: { type: 'string', description: 'The pairing link, as pasted.' },
+          server: { type: 'string', description: 'The Orknux address, when no link was given.' },
+          code_or_token: { type: 'string', description: 'A pairing code or an access token, with server.' },
+        },
+      },
+    },
     {
       name: 'orknux_tools',
       description:
@@ -149,6 +206,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === 'orknux_connect') {
+    const args = (request.params.arguments ?? {}) as { link?: string; server?: string; code_or_token?: string }
+    const link = PAIRING_LINK.exec(args.link ?? '') ?? PAIRING_LINK.exec(args.server ?? '') ?? PAIRING_LINK.exec(args.code_or_token ?? '')
+    try {
+      const user = link !== null
+        ? await connectTo(link[1], link[2])
+        : await connectTo(args.server ?? '', args.code_or_token ?? '')
+      return { content: [{ type: 'text', text: `Connected to ${SERVER} as ${user}. Their Orknux chats with My Claude Code now arrive here.` }] }
+    } catch (failed) {
+      return { content: [{ type: 'text', text: `Not connected: ${(failed as Error).message}` }], isError: true }
+    }
+  }
+  if (SERVER === '' || TOKEN === '') {
+    return { content: [{ type: 'text', text: 'Not connected to Orknux yet: ask the person for a pairing link and call orknux_connect.' }], isError: true }
+  }
   if (request.params.name === 'orknux_tools' || request.params.name === 'orknux_call') {
     const args = (request.params.arguments ?? {}) as { workspace_id?: string; name?: string; arguments?: Record<string, unknown> }
     const workspace = String(args.workspace_id ?? '').trim()
@@ -213,9 +285,10 @@ async function workspaceClient(workspace: string): Promise<Client> {
 }
 
 /** A request to the person's Orknux, signed with their token. */
-function orknux(path: string, init: RequestInit = {}): Promise<Response> {
+function orknux(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<Response> {
   return fetch(SERVER + path, {
     ...init,
+    signal,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) },
   })
 }
@@ -251,10 +324,20 @@ async function handle(command: { action: string; arguments: Record<string, unkno
   }
 }
 
-/** Ask for work until the session ends; a server that is down is asked again, a refused token is not. */
-async function poll() {
+/** The poll running now; orknux_connect stops it and starts one for the new server and credential. */
+let polling: AbortController | null = null
+
+function startPolling() {
+  polling?.abort()
+  const mine = new AbortController()
+  polling = mine
+  void poll(mine.signal)
+}
+
+/** Ask for work until the session ends or the channel is pointed elsewhere; a server that is down is asked again, a refused token is not. */
+async function poll(stopped: AbortSignal) {
   if (SERVER === '' || TOKEN === '') {
-    log(`not configured: run /orknux:configure <server> <code or token>, or set ORKNUX_URL and ORKNUX_TOKEN in ${ENV_FILE}`)
+    log(`not connected yet: paste the pairing link from Orknux into this session, or set ORKNUX_URL and ORKNUX_TOKEN in ${ENV_FILE}`)
     return
   }
   if (!(await pairIfCode())) return
@@ -267,16 +350,18 @@ async function poll() {
   } catch {
     // Unreachable for now; the loop below keeps trying.
   }
-  for (;;) {
+  while (!stopped.aborted) {
     let response: Response
     try {
-      response = await orknux(`/api/claude/next?wait=${WAIT_SECONDS}&client=ClaudeCode&version=${VERSION}`)
+      response = await orknux(`/api/claude/next?wait=${WAIT_SECONDS}&client=ClaudeCode&version=${VERSION}`, {}, stopped)
     } catch {
+      if (stopped.aborted) return
       await sleep(RETRY_MS)
       continue
     }
+    if (stopped.aborted) return
     if (response.status === 401) {
-      log('Orknux refused the token; make a new pairing code or token and run /orknux:configure again')
+      log('Orknux refused the token; paste a new pairing link from Orknux into this session')
       return
     }
     if (response.status === 204) continue
@@ -293,4 +378,4 @@ async function poll() {
 }
 
 await mcp.connect(new StdioServerTransport())
-void poll()
+startPolling()

@@ -14,6 +14,9 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 const TOKEN = 'orkx_test'
+/** What the pairing link's code is traded for: a second person's credential, to see the live poll move over. */
+const SECOND = 'orkxc_second'
+const polls: string[] = []
 const commands: unknown[] = []
 const posted: { path: string; body: any; auth: string | null }[] = []
 const mcpCalls: string[] = []
@@ -34,11 +37,16 @@ const stub = Bun.serve({
     if (url.pathname === '/api/clients/pair' && req.method === 'POST') {
       const asked = (await req.json()) as any
       paired.push(asked)
-      return asked.code.toUpperCase().replace('-', '') === 'K7P4QX'
+      const code = asked.code.toUpperCase().replace('-', '')
+      return code === 'K7P4QX'
         ? Response.json({ credential: TOKEN, user: 'alice' })
-        : Response.json({ error: 'That pairing code is not valid.' }, { status: 400 })
+        : code === 'U7NHQE'
+          ? Response.json({ credential: SECOND, user: 'bob' })
+          : Response.json({ error: 'That pairing code is not valid.' }, { status: 400 })
     }
-    if (req.headers.get('authorization') !== `Bearer ${TOKEN}`) return new Response(null, { status: 401 })
+    const auth = req.headers.get('authorization')
+    if (auth !== `Bearer ${TOKEN}` && auth !== `Bearer ${SECOND}`) return new Response(null, { status: 401 })
+    if (url.pathname === '/api/claude/hello') return Response.json({ user: auth === `Bearer ${SECOND}` ? 'bob' : 'alice' })
     // The workspace's MCP server, as Orknux answers it: JSON-RPC over POST, no stream.
     if (url.pathname === '/mcp/7') {
       if (req.method !== 'POST') return new Response(null, { status: 405 })
@@ -56,6 +64,7 @@ const stub = Bun.serve({
       return Response.json(result === null ? { jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'no' } } : { jsonrpc: '2.0', id: rpc.id, result })
     }
     if (url.pathname === '/api/claude/next') {
+      polls.push(auth!)
       const next = commands.shift()
       if (next) return Response.json(next)
       await Bun.sleep(100)
@@ -110,7 +119,7 @@ const event = notifications.find((n) => n.method === 'notifications/claude/chann
 check('a message from Orknux becomes a channel event, with where it came from', event?.params?.content === 'list the files' && event?.params?.meta?.chat_id === '42' && event?.params?.meta?.chat_title === 'Plans' && event?.params?.meta?.workspace_id === '7', JSON.stringify(event))
 
 const tools = await client.listTools()
-check('it offers the workspace tools and a reply tool', tools.tools.map((t) => t.name).sort().join() === 'orknux_call,orknux_tools,reply', tools.tools.map((t) => t.name).join())
+check('it offers connecting, the workspace tools and a reply tool', tools.tools.map((t) => t.name).sort().join() === 'orknux_call,orknux_connect,orknux_tools,reply', tools.tools.map((t) => t.name).join())
 
 const listed = await client.callTool({ name: 'orknux_tools', arguments: { workspace_id: '7' } })
 check("orknux_tools lists the workspace's own tools, from its MCP server", JSON.stringify(listed.content).includes('orknux_diagram') && !listed.isError, JSON.stringify(listed.content))
@@ -139,7 +148,40 @@ const verdict = notifications.find((n) => n.method === 'notifications/claude/cha
 check('the answer from Orknux goes back to Claude Code as a verdict', verdict?.params?.request_id === 'abcde' && verdict?.params?.behavior === 'allow', JSON.stringify(verdict))
 check('and never as a message to Claude', notifications.filter((n) => n.method === 'notifications/claude/channel').length === 1)
 
+// A pairing link pasted into the session: the running channel moves to it, with no restart.
+const BASE = `http://127.0.0.1:${stub.port}`
+const bad = await client.callTool({ name: 'orknux_connect', arguments: { link: `${BASE}/pair/ZZZ-ZZZ` } })
+check('a pairing link with a code Orknux refuses is said to Claude in words', !!bad.isError && JSON.stringify(bad.content).includes('not valid'), JSON.stringify(bad.content))
+const switched = await client.callTool({ name: 'orknux_connect', arguments: { link: `${BASE}/pair/u7n-hqe` } })
+check('a pairing link connects at once, and says as whom', !switched.isError && JSON.stringify(switched.content).includes('as bob'), JSON.stringify(switched.content))
+const pollsBefore = polls.length
+await until(() => polls.slice(pollsBefore).includes(`Bearer ${SECOND}`))
+check('and the live poll moves to the new credential, no restart', polls.slice(pollsBefore).includes(`Bearer ${SECOND}`), polls.slice(-3).join())
+await Bun.sleep(400)
+const later = polls.slice(polls.length - 3)
+check('and the old one stops asking', later.length > 0 && later.every((one) => one === `Bearer ${SECOND}`), later.join())
+check('and the .env is the new server and credential', readFileSync(join(STATE, '.env'), 'utf8') === `ORKNUX_URL=${BASE}\nORKNUX_TOKEN=${SECOND}\n`)
+const leaked = JSON.stringify(switched.content).includes(SECOND)
+check('the credential is never shown to Claude', !leaked)
+
 await client.close()
+
+// Installed and never configured: it still starts, says it is not connected, and connects from a link.
+const FRESH = mkdtempSync(join(tmpdir(), 'orknux-fresh-'))
+const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('ORKNUX_'))) as Record<string, string>
+const fresh = new Client({ name: 'claude-code-stand-in', version: '0.0.0' })
+await fresh.connect(new StdioClientTransport({ command: 'bun', args: ['dist/server.js'], env: { ...env, ORKNUX_STATE_DIR: FRESH } }))
+check('unconfigured, it starts and tells Claude it is not connected, and how', (fresh.getInstructions() ?? '').includes('NOT connected') && (fresh.getInstructions() ?? '').includes('orknux_connect'))
+const early = await fresh.callTool({ name: 'reply', arguments: { chat_id: '1', text: 'x' } })
+check('and its other tools say so rather than fail', !!early.isError && JSON.stringify(early.content).includes('Not connected'), JSON.stringify(early.content))
+const freshPolls = polls.length
+await Bun.sleep(300)
+check('and it asks Orknux nothing', polls.length === freshPolls)
+const joined = await fresh.callTool({ name: 'orknux_connect', arguments: { link: `${BASE}/pair/K7P-4QX` } })
+check('a pairing link connects it', !joined.isError && JSON.stringify(joined.content).includes('as alice'), JSON.stringify(joined.content))
+await until(() => polls.length > freshPolls)
+check('and it starts asking for messages', polls.length > freshPolls)
+await fresh.close()
 stub.stop(true)
 console.log(failures ? `${failures} failed` : 'all passed')
 process.exit(failures ? 1 : 0)

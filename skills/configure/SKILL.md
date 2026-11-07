@@ -1,80 +1,33 @@
 ---
 name: configure
-description: Set up the Orknux channel - save the Orknux server address and a pairing code or access token. Use when the user pastes an Orknux address, a pairing code like K7P-4QX or an orkx_ token, asks to configure Orknux, asks how to connect this session to Orknux, or wants to check the channel's status.
+description: Connect the Orknux channel - with the pairing link Orknux shows, or a server address and a pairing code or access token. Use when the user pastes an Orknux pairing link (https://.../pair/K7P-4QX), a pairing code or an orkx_ token, asks to connect or configure Orknux, or asks whether the channel is connected.
 user-invocable: true
 allowed-tools:
   - Read
-  - Write
-  - Bash(ls *)
-  - Bash(mkdir *)
-  - Bash(echo *)
-  - Bash(chmod *)
-  - Bash(curl *)
+  - mcp__plugin_orknux_orknux__orknux_connect
 ---
 
-# /orknux:configure - Orknux Channel Setup
-
-Writes the Orknux server address and the person's credential to
-`<state-dir>/.env`: the one a pairing code is traded for, or an access token. The channel reads it when the session starts.
-
-**Resolve the state directory first:**
-
-```bash
-echo "${ORKNUX_STATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels/orknux}"
-```
-
-Use the printed path everywhere below in place of `<state-dir>`.
+# /orknux:configure - connect the Orknux channel
 
 Arguments passed: `$ARGUMENTS`
 
+## A pairing link, or a server and a code or token
+
+Call the channel's `orknux_connect` tool:
+
+- a pairing link (`https://<their Orknux>/pair/K7P-4QX`) as `link`;
+- otherwise the server address as `server` and the code or `orkx_` /
+  `orkxc_` token as `code_or_token`.
+
+It trades a code, checks Orknux takes it, saves it and connects the running
+channel at once - no restart. Say what it answered. Never print a token.
+
+If the tool is not there, the channel is not running in this session: start
+Claude Code with `--dangerously-load-development-channels plugin:orknux@orknux`.
+
 ## No arguments - status
 
-Read `<state-dir>/.env` and say:
-
-1. **Server** - `ORKNUX_URL`, or that it is not set.
-2. **Token** - set or not; if set, show only its first 9 characters (`orkxc_abc…`). Never print the rest.
-3. **What next**:
-   - Nothing set: "Run `/orknux:configure <server> <code>`. The server is the
-     address you open Orknux at, such as `http://127.0.0.1:8080`; the code is
-     from **Connect a client** in Orknux, under Preferences › Connected clients.
-     A **read and write** access token works in its place."
-   - Both set: "Ready. Restart Claude Code with the channel on (see the
-     README), then pick **My Claude Code** in an Orknux chat."
-
-## `<server> <code or token>` - save them
-
-1. The server is the first argument without a trailing `/`; it must start with
-   `http://` or `https://`. The second is either a **pairing code** - six
-   letters and digits, usually with a dash, like `K7P-4QX` - or a token
-   starting with `orkx_` or `orkxc_`. Anything else: say what is wrong and stop.
-2. **A pairing code is traded first**, at once, since it works once and only
-   for a few minutes:
-   `curl -s -X POST -H "Content-Type: application/json" -d '{"code":"<code>","client":"ClaudeCode","name":"Claude Code"}' <server>/api/clients/pair`
-   - It answers `{"credential":"orkxc_…","user":"…"}`: use that credential as
-     the token from here on, and never print it whole.
-   - It answers `{"error":"…"}`: say the error - usually the code was mistyped,
-     used or ran out, and a new one is made in Orknux - and stop.
-   - Nothing: the server cannot be reached from here. Stop.
-3. Check the token before saving:
-   `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer <token>" <server>/api/claude/hello`
-   - `200`: good.
-   - `401`: the token is wrong, was deleted, or the client was disconnected. Stop.
-   - `404`: this Orknux is not a local edition (the desktop app or orknux-one),
-     or is older than My Claude Code. Stop and say so.
-   - Anything else, or nothing: the server cannot be reached from here. Save
-     anyway only if the user says so.
-4. `mkdir -p <state-dir>`, then write `<state-dir>/.env` with exactly:
-
-   ```
-   ORKNUX_URL=<server>
-   ORKNUX_TOKEN=<token>
-   ```
-
-   and `chmod 600 <state-dir>/.env`.
-5. Tell the user to restart Claude Code with the channel on, as the README
-   says, and that the token is now readable only by their account.
-
-## `clear`
-
-Delete `<state-dir>/.env` and say the channel will stay unconfigured until
-`/orknux:configure` is run again.
+Read `${ORKNUX_STATE_DIR:-~/.claude/channels/orknux}/.env` and say the server
+(`ORKNUX_URL`) and whether a token is set, showing at most its first 9
+characters. If nothing is set: "In Orknux open Preferences › Connected clients
+› Connect a client, copy the pairing link and paste it here."

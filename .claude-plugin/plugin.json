@@ -1,7 +1,7 @@
 {
   "name": "orknux",
   "description": "Orknux channel for Claude Code: talk to this Claude Code session from an Orknux chat (\"My Claude Code\") on the Orknux desktop app or orknux-one. Configure with /orknux:configure.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "keywords": [
     "orknux",
     "channel",
