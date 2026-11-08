@@ -107,6 +107,18 @@ takes your messages first. If you set one up that way, remove it:
 claude mcp remove <its name> -s user
 ```
 
+## When Orknux says Claude Code isn't connected
+
+- `/mcp` in the session should list **plugin:orknux:orknux**. If it does not,
+  the plugin is not loaded: `/reload-plugins` says how many plugins are.
+- Adding the marketplace does not install the plugin; `/plugin install
+  orknux@orknux` does. Installed is not enabled either: in `/plugin` ›
+  **Installed** choose `orknux` and enable it, or set `"orknux@orknux": true`
+  under `enabledPlugins` in `~/.claude/settings.json`. **Errors** in `/plugin`
+  says why one that is enabled did not load.
+- The session has to be started with the channel (see **Start**); one that was
+  not never collects messages, by design.
+
 To see which copy is running, look for `bun` processes and the `server.js`
 each started from - on Windows,
 `Get-CimInstance Win32_Process -Filter "name='bun.exe'" | Select-Object ProcessId, CommandLine`;
