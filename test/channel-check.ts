@@ -108,18 +108,30 @@ const until = async (ok: () => boolean, ms = 5000) => {
   return ok()
 }
 
+// The check: sent at start, and nothing collected until the session answers it - a Claude Code without the channel
+// never does, and so never takes a message it would drop.
+const isCheck = (n: { method: string; params: any }) => n.method === 'notifications/claude/channel' && n.params?.meta?.check === 'heard'
+await until(() => notifications.some(isCheck))
+check('it asks the session whether it hears the channel', notifications.some(isCheck), JSON.stringify(notifications))
+await Bun.sleep(300)
+check('and collects no messages until it is answered', polls.length === 0, `${polls.length} polls`)
+const heardAnswer = await client.callTool({ name: 'orknux_heard', arguments: {} })
+check('answered, it says heard', JSON.stringify(heardAnswer.content).includes('heard') && !heardAnswer.isError)
+await until(() => polls.length > 0)
+check('and starts collecting messages', polls.length > 0)
+
 await until(() => paired.length > 0)
 check('a pairing code is traded once, as Claude Code', paired.length === 1 && paired[0].client === 'ClaudeCode', JSON.stringify(paired))
 await until(() => { try { return readFileSync(join(STATE, '.env'), 'utf8').includes(TOKEN) } catch { return false } })
 check('and the credential replaces the code in the .env', (() => { try { const env = readFileSync(join(STATE, '.env'), 'utf8'); return env.includes(`ORKNUX_TOKEN=${TOKEN}`) && !env.includes('k7p') } catch { return false } })())
 
 commands.push({ id: '1', action: 'message', arguments: { chat_id: '42', chat_title: 'Plans', workspace_id: '7', text: 'list the files' } })
-await until(() => notifications.some((n) => n.method === 'notifications/claude/channel'))
-const event = notifications.find((n) => n.method === 'notifications/claude/channel')
+await until(() => notifications.some((n) => n.method === 'notifications/claude/channel' && !isCheck(n)))
+const event = notifications.find((n) => n.method === 'notifications/claude/channel' && !isCheck(n))
 check('a message from Orknux becomes a channel event, with where it came from', event?.params?.content === 'list the files' && event?.params?.meta?.chat_id === '42' && event?.params?.meta?.chat_title === 'Plans' && event?.params?.meta?.workspace_id === '7', JSON.stringify(event))
 
 const tools = await client.listTools()
-check('it offers connecting, the workspace tools and a reply tool', tools.tools.map((t) => t.name).sort().join() === 'orknux_call,orknux_connect,orknux_tools,reply', tools.tools.map((t) => t.name).join())
+check('it offers connecting, the workspace tools, the check and a reply tool', tools.tools.map((t) => t.name).sort().join() === 'orknux_call,orknux_connect,orknux_heard,orknux_tools,reply', tools.tools.map((t) => t.name).join())
 
 const listed = await client.callTool({ name: 'orknux_tools', arguments: { workspace_id: '7' } })
 check("orknux_tools lists the workspace's own tools, from its MCP server", JSON.stringify(listed.content).includes('orknux_diagram') && !listed.isError, JSON.stringify(listed.content))
@@ -146,7 +158,7 @@ commands.push({ id: '2', action: 'permission', arguments: { request_id: 'ABCDE',
 await until(() => notifications.some((n) => n.method === 'notifications/claude/channel/permission'))
 const verdict = notifications.find((n) => n.method === 'notifications/claude/channel/permission')
 check('the answer from Orknux goes back to Claude Code as a verdict', verdict?.params?.request_id === 'abcde' && verdict?.params?.behavior === 'allow', JSON.stringify(verdict))
-check('and never as a message to Claude', notifications.filter((n) => n.method === 'notifications/claude/channel').length === 1)
+check('and never as a message to Claude', notifications.filter((n) => n.method === 'notifications/claude/channel' && !isCheck(n)).length === 1)
 
 // A pairing link pasted into the session: the running channel moves to it, with no restart.
 const BASE = `http://127.0.0.1:${stub.port}`
@@ -179,8 +191,12 @@ await Bun.sleep(300)
 check('and it asks Orknux nothing', polls.length === freshPolls)
 const joined = await fresh.callTool({ name: 'orknux_connect', arguments: { link: `${BASE}/pair/K7P-4QX` } })
 check('a pairing link connects it', !joined.isError && JSON.stringify(joined.content).includes('as alice'), JSON.stringify(joined.content))
+check('and says messages come once the session answers the check', JSON.stringify(joined.content).includes("answered the channel"), JSON.stringify(joined.content))
+await Bun.sleep(300)
+check('a session that has not answered asks Orknux nothing, connected or not', polls.length === freshPolls)
+await fresh.callTool({ name: 'orknux_heard', arguments: {} })
 await until(() => polls.length > freshPolls)
-check('and it starts asking for messages', polls.length > freshPolls)
+check('and once it has, it starts asking for messages', polls.length > freshPolls)
 await fresh.close()
 stub.stop(true)
 console.log(failures ? `${failures} failed` : 'all passed')

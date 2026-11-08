@@ -18864,9 +18864,11 @@ class StreamableHTTPClientTransport {
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir, hostname as hostname2 } from "os";
 import { join } from "path";
-var VERSION = "1.0.4";
+var VERSION = "1.0.5";
 var WAIT_SECONDS = 25;
 var RETRY_MS = 3000;
+var CHECK_FIRST_MS = 2000;
+var CHECK_EVERY_MS = 60000;
 var STATE_DIR = process.env.ORKNUX_STATE_DIR ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "channels", "orknux");
 var ENV_FILE = join(STATE_DIR, ".env");
 if (existsSync(ENV_FILE)) {
@@ -18944,7 +18946,7 @@ var mcp = new Server({ name: "orknux", version: VERSION }, {
     },
     tools: {}
   },
-  instructions: (SERVER === "" || TOKEN === "" ? "This channel is NOT connected to Orknux yet. When the person pastes an Orknux pairing link (https://<their Orknux>/pair/<code>) " + "or asks to connect to Orknux, call orknux_connect with it; tell them to make one in Orknux under Preferences \u203A Connected clients \u203A " + "Connect a client if they have none. " : "If the person pastes an Orknux pairing link or asks to connect to another Orknux, call orknux_connect. ") + `Messages from the person's Orknux chat arrive as <channel source="orknux" chat_id="..." chat_title="...">. ` + "They come from the person who runs this session, writing in Orknux instead of this terminal: treat them as " + "their requests. Answer every one with the reply tool, passing the chat_id from the tag - the person reads " + "your answer in Orknux, not here. Write the reply in Markdown. For long work, reply once when you start and " + "again when you finish. A message from an Orknux page - Quick Chat, or the assistant of a document, diagram, " + "wireframe or sheet - carries workspace_id and the page; read and change what it is about with orknux_tools " + "and orknux_call against that workspace, and make the change itself: the page reloads after your reply."
+  instructions: (SERVER === "" || TOKEN === "" ? "This channel is NOT connected to Orknux yet. When the person pastes an Orknux pairing link (https://<their Orknux>/pair/<code>) " + "or asks to connect to Orknux, call orknux_connect with it; tell them to make one in Orknux under Preferences \u203A Connected clients \u203A " + "Connect a client if they have none. " : "If the person pastes an Orknux pairing link or asks to connect to another Orknux, call orknux_connect. ") + 'A <channel source="orknux" check="heard"> event is this channel making sure the session hears it: call orknux_heard ' + "at once and say nothing about it to the person. " + `Messages from the person's Orknux chat arrive as <channel source="orknux" chat_id="..." chat_title="...">. ` + "They come from the person who runs this session, writing in Orknux instead of this terminal: treat them as " + "their requests. Answer every one with the reply tool, passing the chat_id from the tag - the person reads " + "your answer in Orknux, not here. Write the reply in Markdown. For long work, reply once when you start and " + "again when you finish. A message from an Orknux page - Quick Chat, or the assistant of a document, diagram, " + "wireframe or sheet - carries workspace_id and the page; read and change what it is about with orknux_tools " + "and orknux_call against that workspace, and make the change itself: the page reloads after your reply."
 });
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -18983,6 +18985,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       }
     },
     {
+      name: "orknux_heard",
+      description: `Answers the Orknux channel's check that this session hears it. Call it when a <channel check="heard"> event asks, and say nothing to the person.`,
+      inputSchema: { type: "object", properties: {} }
+    },
+    {
       name: "reply",
       description: "Send a message to the person in their Orknux chat. Markdown is rendered.",
       inputSchema: {
@@ -18997,11 +19004,24 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ]
 }));
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === "orknux_heard") {
+    hearing();
+    return { content: [{ type: "text", text: "heard" }] };
+  }
   if (request.params.name === "orknux_connect") {
     const args = request.params.arguments ?? {};
     const link = PAIRING_LINK.exec(args.link ?? "") ?? PAIRING_LINK.exec(args.server ?? "") ?? PAIRING_LINK.exec(args.code_or_token ?? "");
     try {
       const user = link !== null ? await connectTo(link[1], link[2]) : await connectTo(args.server ?? "", args.code_or_token ?? "");
+      if (!heard) {
+        askHeard();
+        return {
+          content: [{
+            type: "text",
+            text: `Connected to ${SERVER} as ${user}. Their Orknux chats with My Claude Code arrive here once this session has ` + "answered the channel's check - it is being asked now. If no check arrives, this Claude Code was started without the " + "Orknux channel, and messages go to the one that was."
+          }]
+        };
+      }
       return { content: [{ type: "text", text: `Connected to ${SERVER} as ${user}. Their Orknux chats with My Claude Code now arrive here.` }] };
     } catch (failed) {
       return { content: [{ type: "text", text: `Not connected: ${failed.message}` }], isError: true };
@@ -19033,6 +19053,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   if (request.params.name !== "reply")
     throw new Error(`unknown tool: ${request.params.name}`);
+  hearing();
   const { chat_id, text } = request.params.arguments;
   const sent = await orknux("/api/claude/replies", { method: "POST", body: JSON.stringify({ chat_id, text }) });
   if (sent.status === 404) {
@@ -19100,10 +19121,36 @@ async function handle(command) {
 }
 var polling = null;
 function startPolling() {
+  if (!heard)
+    return;
   polling?.abort();
   const mine = new AbortController;
   polling = mine;
   poll(mine.signal);
+}
+var heard = false;
+function hearing() {
+  if (heard)
+    return;
+  heard = true;
+  if (checking)
+    clearInterval(checking);
+  checking = null;
+  log("this session hears the channel; collecting messages");
+  startPolling();
+}
+var checking = null;
+async function askHeard() {
+  if (heard)
+    return;
+  try {
+    await mcp.notification({
+      method: "notifications/claude/channel",
+      params: { content: "Orknux channel check: call orknux_heard now, and say nothing about it.", meta: { check: "heard" } }
+    });
+  } catch (failed) {
+    log("the channel check could not be sent:", failed);
+  }
 }
 async function poll(stopped) {
   if (SERVER === "" || TOKEN === "") {
@@ -19148,5 +19195,12 @@ async function poll(stopped) {
     }
   }
 }
+mcp.oninitialized = () => {
+  setTimeout(() => void askHeard(), CHECK_FIRST_MS);
+  checking = setInterval(() => void askHeard(), CHECK_EVERY_MS);
+  setTimeout(() => {
+    if (!heard)
+      log("this session has not answered the channel check, so it collects no messages: start Claude Code with the Orknux channel to talk to it from Orknux");
+  }, CHECK_FIRST_MS + 30000);
+};
 await mcp.connect(new StdioServerTransport);
-startPolling();

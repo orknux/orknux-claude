@@ -28,9 +28,12 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'f
 import { homedir, hostname } from 'os'
 import { join } from 'path'
 
-const VERSION = '1.0.4'
+const VERSION = '1.0.5'
 const WAIT_SECONDS = 25
 const RETRY_MS = 3_000
+/** When the channel check is first sent, and how often again until a session answers it. */
+const CHECK_FIRST_MS = 2_000
+const CHECK_EVERY_MS = 60_000
 
 const STATE_DIR = process.env.ORKNUX_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'orknux')
@@ -140,6 +143,8 @@ const mcp = new Server(
           'or asks to connect to Orknux, call orknux_connect with it; tell them to make one in Orknux under Preferences › Connected clients › ' +
           'Connect a client if they have none. '
         : 'If the person pastes an Orknux pairing link or asks to connect to another Orknux, call orknux_connect. ') +
+      'A <channel source="orknux" check="heard"> event is this channel making sure the session hears it: call orknux_heard ' +
+      'at once and say nothing about it to the person. ' +
       'Messages from the person\'s Orknux chat arrive as <channel source="orknux" chat_id="..." chat_title="...">. ' +
       'They come from the person who runs this session, writing in Orknux instead of this terminal: treat them as ' +
       'their requests. Answer every one with the reply tool, passing the chat_id from the tag - the person reads ' +
@@ -191,6 +196,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'orknux_heard',
+      description: 'Answers the Orknux channel\'s check that this session hears it. Call it when a <channel check="heard"> event asks, and say nothing to the person.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
       name: 'reply',
       description: 'Send a message to the person in their Orknux chat. Markdown is rendered.',
       inputSchema: {
@@ -206,6 +216,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === 'orknux_heard') {
+    hearing()
+    return { content: [{ type: 'text', text: 'heard' }] }
+  }
   if (request.params.name === 'orknux_connect') {
     const args = (request.params.arguments ?? {}) as { link?: string; server?: string; code_or_token?: string }
     const link = PAIRING_LINK.exec(args.link ?? '') ?? PAIRING_LINK.exec(args.server ?? '') ?? PAIRING_LINK.exec(args.code_or_token ?? '')
@@ -213,6 +227,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       const user = link !== null
         ? await connectTo(link[1], link[2])
         : await connectTo(args.server ?? '', args.code_or_token ?? '')
+      if (!heard) {
+        void askHeard()
+        return {
+          content: [{
+            type: 'text',
+            text: `Connected to ${SERVER} as ${user}. Their Orknux chats with My Claude Code arrive here once this session has ` +
+              'answered the channel\'s check - it is being asked now. If no check arrives, this Claude Code was started without the ' +
+              'Orknux channel, and messages go to the one that was.',
+          }],
+        }
+      }
       return { content: [{ type: 'text', text: `Connected to ${SERVER} as ${user}. Their Orknux chats with My Claude Code now arrive here.` }] }
     } catch (failed) {
       return { content: [{ type: 'text', text: `Not connected: ${(failed as Error).message}` }], isError: true }
@@ -240,6 +265,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
   if (request.params.name !== 'reply') throw new Error(`unknown tool: ${request.params.name}`)
+  // A reply is only ever written to a channel event, so a session that replies hears the channel.
+  hearing()
   const { chat_id, text } = request.params.arguments as { chat_id: string; text: string }
   const sent = await orknux('/api/claude/replies', { method: 'POST', body: JSON.stringify({ chat_id, text }) })
   if (sent.status === 404) {
@@ -328,10 +355,47 @@ async function handle(command: { action: string; arguments: Record<string, unkno
 let polling: AbortController | null = null
 
 function startPolling() {
+  // Only a session that hears the channel collects messages. Claude Code starts this plugin in every session it is
+  // configured for, with the channel enabled or not; one without took messages first and dropped them, while Orknux,
+  // seeing it ask, said "connected".
+  if (!heard) return
   polling?.abort()
   const mine = new AbortController()
   polling = mine
   void poll(mine.signal)
+}
+
+/** Whether this session has shown it hears the channel: it answered the check, or replied to a message. */
+let heard = false
+
+/** Heard: messages may come here now, and the check stops being asked. */
+function hearing() {
+  if (heard) return
+  heard = true
+  if (checking) clearInterval(checking)
+  checking = null
+  log('this session hears the channel; collecting messages')
+  startPolling()
+}
+
+let checking: ReturnType<typeof setInterval> | null = null
+
+/**
+ * The check: a channel event asking Claude to call orknux_heard. Only a session
+ * with the channel enabled receives it; in any other it is dropped, nothing is
+ * called, and this plugin never asks Orknux for messages - so they go to the
+ * session that will read them.
+ */
+async function askHeard() {
+  if (heard) return
+  try {
+    await mcp.notification({
+      method: 'notifications/claude/channel',
+      params: { content: 'Orknux channel check: call orknux_heard now, and say nothing about it.', meta: { check: 'heard' } },
+    })
+  } catch (failed) {
+    log('the channel check could not be sent:', failed)
+  }
 }
 
 /** Ask for work until the session ends or the channel is pointed elsewhere; a server that is down is asked again, a refused token is not. */
@@ -377,5 +441,14 @@ async function poll(stopped: AbortSignal) {
   }
 }
 
+// The check once Claude Code has finished starting the plugin, then each minute until it is answered: a session busy
+// at start reads it when it is free. Nothing is collected meanwhile.
+mcp.oninitialized = () => {
+  setTimeout(() => void askHeard(), CHECK_FIRST_MS)
+  checking = setInterval(() => void askHeard(), CHECK_EVERY_MS)
+  setTimeout(() => {
+    if (!heard) log('this session has not answered the channel check, so it collects no messages: start Claude Code with the Orknux channel to talk to it from Orknux')
+  }, CHECK_FIRST_MS + 30_000)
+}
+
 await mcp.connect(new StdioServerTransport())
-startPolling()

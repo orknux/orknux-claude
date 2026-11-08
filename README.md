@@ -71,6 +71,14 @@ Claude Code asks you to confirm once per start. Then open Orknux, start a chat,
 and pick **My Claude Code**. The corner of Orknux shows **Claude Code
 connected** while this session is running.
 
+Only a session started this way collects your messages. Claude Code starts the
+plugin in every session it is configured for, so at start the plugin sends one
+channel event asking Claude to call `orknux_heard`, and collects nothing until
+it does: a session without the channel never receives that event, never
+answers it, and so never takes a message it would drop. The terminal of such a
+session says so after half a minute. With several sessions open, messages go to
+the ones that answered.
+
 Approvals: answer `yes abcde` or `no abcde` in the chat, as the message there
 says, or in this terminal; whichever comes first counts. To stop being asked
 for the reply tool every time, allow `mcp__plugin_orknux_orknux__reply` in
