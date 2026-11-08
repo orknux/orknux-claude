@@ -84,6 +84,34 @@ says, or in this terminal; whichever comes first counts. To stop being asked
 for the reply tool every time, allow `mcp__plugin_orknux_orknux__reply` in
 Claude Code's permissions.
 
+## Update
+
+In Claude Code:
+
+```
+/plugin marketplace update orknux
+```
+
+then restart Claude Code with the channel, as under **Start**. The session
+starts whichever version is installed; Orknux shows the version under
+**Preferences › Connected clients**.
+
+Start it as `plugin:orknux@orknux`, not as an MCP server of its own pointing
+at the plugin's files. Claude Code keeps each version in a folder named after
+it (`~/.claude/plugins/cache/orknux/orknux/<version>/`), so a server added by
+hand with `claude mcp add` goes on starting the version it was pointed at,
+whatever the marketplace has installed since - and an old copy still polling
+takes your messages first. If you set one up that way, remove it:
+
+```
+claude mcp remove <its name> -s user
+```
+
+To see which copy is running, look for `bun` processes and the `server.js`
+each started from - on Windows,
+`Get-CimInstance Win32_Process -Filter "name='bun.exe'" | Select-Object ProcessId, CommandLine`;
+elsewhere, `ps -ef | grep server.js`.
+
 ## How it works
 
 The plugin is an MCP server Claude Code starts over stdio. It holds a long
